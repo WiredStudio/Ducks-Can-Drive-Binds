@@ -1,2 +1,1 @@
-# Ducks-Can-Drive-Binds
-A Binds Mod Using MelonLoader
+# Ducks-Can-Drive-ReBinds
