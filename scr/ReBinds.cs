@@ -1,15 +1,15 @@
-﻿using MelonLoader;
+using MelonLoader;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.EventSystems;
+using UnityEngine.SceneManagement;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 
 [assembly: MelonInfo(typeof(ReBinds.VehicleControlMod), "Ducks Can Drive - ReBinds", "1.0.0", "WiredStudio")]
 [assembly: MelonGame("Joseph Cook", "Ducks Can Drive")]
-
 //Welcome to my hell, this took way longer than I expected.
 namespace ReBinds
 {
@@ -33,7 +33,7 @@ namespace ReBinds
             RightKey = category.CreateEntry("Right", KeyCode.D, "Right");
             DriftKey = category.CreateEntry("Drift", KeyCode.Space, "Drift (Jump)");
             HonkKey = category.CreateEntry("Honk", KeyCode.H, "Honk (Quack)");
-            RestartKey = category.CreateEntry("Restart", KeyCode.R, "Restart (Not Implemented)");
+            RestartKey = category.CreateEntry("Restart", KeyCode.R, "Restart");
         }
 
         public static IEnumerable<MelonPreferences_Entry<KeyCode>> AllBindings
@@ -54,6 +54,10 @@ namespace ReBinds
     public class VehicleControlMod : MelonMod
     {
         private static AudioSource quackSource;
+        private AudioClip quackClip;
+        private bool hasTriedFindingClip = false;
+        private bool audioSourceAttached = false;
+
         private bool showBindingsWindow = false;
         private string currentBindingAction = "";
         private KeyCode pendingKey;
@@ -62,9 +66,6 @@ namespace ReBinds
         private Vector2 scrollPos;
         private bool buttonAdded = false;
         private int findAttempts;
-
-        private bool showRestartMessage = false;
-        private float restartMessageTimer = 0f;
 
         private readonly float windowWidth = 450;
         private readonly float windowHeight = 350;
@@ -76,20 +77,24 @@ namespace ReBinds
         private GUIStyle labelStyle;
         private GUIStyle buttonStyle;
         private GUIStyle conflictBoxStyle;
-        private GUIStyle messageStyle;
 
         private GameObject controlsButton;
+        private bool hasLoggedMissingQuack = false;
 
         public override void OnInitializeMelon()
         {
-            MelonLogger.Msg("Vehicle Control Mod initializing...");
             Bindings.Initialize();
             HarmonyInstance.PatchAll();
-            MelonLogger.Msg("Harmony patches applied.");
         }
 
         public override void OnSceneWasUnloaded(int buildIndex, string sceneName)
         {
+            quackSource = null;
+            quackClip = null;
+            hasTriedFindingClip = false;
+            audioSourceAttached = false;
+            hasLoggedMissingQuack = false;
+
             if (disabledRaycasters.Count > 0)
             {
                 DisableModalMode();
@@ -98,7 +103,6 @@ namespace ReBinds
 
         public override void OnSceneWasLoaded(int buildIndex, string sceneName)
         {
-            MelonLogger.Msg($"Scene loaded: {sceneName}");
             if (sceneName == "Menu")
             {
                 buttonAdded = false;
@@ -115,7 +119,6 @@ namespace ReBinds
         private IEnumerator WaitForMenuAndAddButton()
         {
             yield return null;
-
             float timeout = Time.time + 5f;
             GameObject settingsMenu = null;
             Canvas canvas = null;
@@ -140,13 +143,11 @@ namespace ReBinds
 
             if (settingsMenu != null && canvas != null)
             {
-                MelonLogger.Msg("SettingsMenu is ready. Adding button.");
                 AddControlsButton(settingsMenu);
                 buttonAdded = true;
             }
             else
             {
-                MelonLogger.Warning("SettingsMenu not ready after timeout. Creating standalone button.");
                 CreateStandaloneButton();
                 buttonAdded = true;
             }
@@ -249,8 +250,6 @@ namespace ReBinds
             textRect.sizeDelta = Vector2.zero;
 
             btn.onClick.AddListener(() => { showBindingsWindow = true; });
-
-            MelonLogger.Msg("Controls button added.");
         }
 
         private void SetDefaultTextStyle(Text txt)
@@ -287,10 +286,7 @@ namespace ReBinds
         {
             Canvas canvas = GameObject.FindObjectOfType<Canvas>();
             if (canvas == null)
-            {
-                MelonLogger.Error("No canvas found. Cannot create standalone button.");
                 return;
-            }
 
             controlsButton = new GameObject("ControlsButton", typeof(RectTransform), typeof(Image), typeof(Button));
             controlsButton.transform.SetParent(canvas.transform, false);
@@ -329,41 +325,74 @@ namespace ReBinds
             textRect.sizeDelta = Vector2.zero;
 
             btn.onClick.AddListener(() => { showBindingsWindow = true; });
-
-            MelonLogger.Msg("Standalone button created.");
         }
 
         public override void OnUpdate()
         {
-            if (quackSource == null)
+            if (quackSource == null && !hasTriedFindingClip)
             {
                 GameObject quackObj = FindInactiveGameObject("Quack");
                 if (quackObj != null)
                 {
                     quackSource = quackObj.GetComponent<AudioSource>();
-                    if (quackSource != null)
-                        MelonLogger.Msg("Found Quack audio source.");
+                }
+
+                if (quackSource == null)
+                {
+                    AudioClip[] clips = Resources.FindObjectsOfTypeAll<AudioClip>();
+                    foreach (AudioClip clip in clips)
+                    {
+                        if (clip.name.Equals("quack", System.StringComparison.OrdinalIgnoreCase) ||
+                            clip.name.ToLower().Contains("quack"))
+                        {
+                            quackClip = clip;
+                            GameObject temp = new GameObject("TempHonkSource");
+                            quackSource = temp.AddComponent<AudioSource>();
+                            quackSource.clip = quackClip;
+                            quackSource.playOnAwake = false;
+                            quackSource.spatialBlend = 1f;
+                            break;
+                        }
+                    }
+                }
+
+                hasTriedFindingClip = true;
+
+                if (quackSource == null && !hasLoggedMissingQuack)
+                {
+                    hasLoggedMissingQuack = true;
                 }
             }
 
-            if (quackSource != null && Input.GetKeyDown(Bindings.HonkKey.Value))
+            if (quackSource != null && !audioSourceAttached)
             {
-                quackSource.pitch = Random.Range(0.8f, 1.2f);
-                quackSource.Play();
+                Camera mainCam = Camera.main;
+                if (mainCam != null)
+                {
+                    quackSource.transform.SetParent(mainCam.transform);
+                    quackSource.transform.localPosition = Vector3.zero;
+                    quackSource.spatialBlend = 1f;
+                    audioSourceAttached = true;
+                }
+                else
+                {
+                    quackSource.spatialBlend = 0f;
+                    audioSourceAttached = true;
+                }
+            }
+
+            if (Input.GetKeyDown(Bindings.HonkKey.Value))
+            {
+                if (quackSource != null)
+                {
+                    quackSource.pitch = Random.Range(0.8f, 1.2f);
+                    quackSource.Play();
+                }
             }
 
             if (Input.GetKeyDown(Bindings.RestartKey.Value))
             {
-                MelonLogger.Msg("Restart key pressed - not implemented.");
-                showRestartMessage = true;
-                restartMessageTimer = 3f;
-            }
-
-            if (showRestartMessage)
-            {
-                restartMessageTimer -= Time.deltaTime;
-                if (restartMessageTimer <= 0)
-                    showRestartMessage = false;
+                RestartGame();
             }
 
             if (showBindingsWindow != wasModalActive)
@@ -376,52 +405,19 @@ namespace ReBinds
             }
         }
 
+        private void RestartGame()
+        {
+            string currentScene = SceneManager.GetActiveScene().name;
+            SceneManager.LoadScene(currentScene);
+        }
+
         public override void OnGUI()
         {
-            if (showRestartMessage)
-            {
-                if (messageStyle == null)
-                {
-                    messageStyle = new GUIStyle(GUI.skin.box);
-                    messageStyle.normal.background = MakeTex(2, 2, new Color(0.2f, 0.2f, 0.2f, 0.9f));
-                    messageStyle.normal.textColor = Color.yellow;
-                    messageStyle.fontSize = 20;
-                    messageStyle.alignment = TextAnchor.MiddleCenter;
-                }
-                float msgWidth = 300;
-                float msgHeight = 60;
-                Rect msgRect = new Rect(Screen.width / 2 - msgWidth / 2, Screen.height / 2 - msgHeight / 2, msgWidth, msgHeight);
-                GUI.Box(msgRect, "Restart not implemented yet!", messageStyle);
-            }
-
             if (showBindingsWindow)
             {
-                if (windowStyle == null)
+                if (windowStyle == null || windowStyle.normal.background == null)
                 {
-                    windowStyle = new GUIStyle();
-                    windowStyle.normal.background = MakeTex(2, 2, new Color(0.1f, 0.1f, 0.1f, 0.95f));
-                    windowStyle.normal.textColor = Color.white;
-                    windowStyle.fontSize = 20;
-                    windowStyle.fontStyle = FontStyle.Bold;
-                    windowStyle.alignment = TextAnchor.UpperCenter;
-                    windowStyle.padding = new RectOffset(10, 10, 10, 10);
-
-                    labelStyle = new GUIStyle(GUI.skin.label);
-                    labelStyle.normal.textColor = Color.white;
-                    labelStyle.fontSize = 16;
-
-                    buttonStyle = new GUIStyle(GUI.skin.button);
-                    buttonStyle.normal.background = MakeTex(2, 2, new Color(0.3f, 0.3f, 0.3f, 1f));
-                    buttonStyle.hover.background = MakeTex(2, 2, new Color(0.5f, 0.5f, 0.5f, 1f));
-                    buttonStyle.active.background = MakeTex(2, 2, new Color(0.2f, 0.2f, 0.2f, 1f));
-                    buttonStyle.normal.textColor = Color.white;
-                    buttonStyle.fontSize = 14;
-
-                    conflictBoxStyle = new GUIStyle(GUI.skin.box);
-                    conflictBoxStyle.normal.background = MakeTex(2, 2, new Color(0.8f, 0.2f, 0.2f, 0.8f));
-                    conflictBoxStyle.normal.textColor = Color.white;
-                    conflictBoxStyle.fontSize = 14;
-                    conflictBoxStyle.alignment = TextAnchor.MiddleCenter;
+                    CreateStyles();
                 }
 
                 Rect windowRect = new Rect(Screen.width / 2 - windowWidth / 2, Screen.height / 2 - windowHeight / 2, windowWidth, windowHeight);
@@ -430,6 +426,45 @@ namespace ReBinds
                 DrawBindingsContent();
                 GUILayout.EndArea();
             }
+        }
+
+        private void CreateStyles()
+        {
+            windowStyle = new GUIStyle();
+            windowStyle.normal.background = MakeTex(2, 2, new Color(0.1f, 0.1f, 0.1f, 0.95f));
+            windowStyle.normal.textColor = Color.white;
+            windowStyle.fontSize = 20;
+            windowStyle.fontStyle = FontStyle.Bold;
+            windowStyle.alignment = TextAnchor.UpperCenter;
+            windowStyle.padding = new RectOffset(10, 10, 10, 10);
+
+            labelStyle = new GUIStyle(GUI.skin.label);
+            labelStyle.normal.textColor = Color.white;
+            labelStyle.fontSize = 16;
+
+            buttonStyle = new GUIStyle(GUI.skin.button);
+            buttonStyle.normal.background = MakeTex(2, 2, new Color(0.3f, 0.3f, 0.3f, 1f));
+            buttonStyle.hover.background = MakeTex(2, 2, new Color(0.5f, 0.5f, 0.5f, 1f));
+            buttonStyle.active.background = MakeTex(2, 2, new Color(0.2f, 0.2f, 0.2f, 1f));
+            buttonStyle.normal.textColor = Color.white;
+            buttonStyle.fontSize = 14;
+
+            conflictBoxStyle = new GUIStyle(GUI.skin.box);
+            conflictBoxStyle.normal.background = MakeTex(2, 2, new Color(0.8f, 0.2f, 0.2f, 0.8f));
+            conflictBoxStyle.normal.textColor = Color.white;
+            conflictBoxStyle.fontSize = 14;
+            conflictBoxStyle.alignment = TextAnchor.MiddleCenter;
+        }
+
+        private Texture2D MakeTex(int width, int height, Color col)
+        {
+            Color[] pix = new Color[width * height];
+            for (int i = 0; i < pix.Length; i++)
+                pix[i] = col;
+            Texture2D result = new Texture2D(width, height);
+            result.SetPixels(pix);
+            result.Apply();
+            return result;
         }
 
         private void DrawBindingsContent()
@@ -455,7 +490,7 @@ namespace ReBinds
             {
                 if (currentBindingAction == "Restart")
                 {
-                    GUILayout.Label("Restart functionality is not implemented yet.\nYou can bind a key, but it won't do anything.", labelStyle, GUILayout.Height(60));
+                    GUILayout.Label("This will restart the current level.", labelStyle, GUILayout.Height(30));
                 }
                 GUILayout.Label($"Press any key for {currentBindingAction}...", labelStyle, GUILayout.Height(30));
                 if (Event.current.isKey && Event.current.keyCode != KeyCode.None)
@@ -493,17 +528,6 @@ namespace ReBinds
             }
         }
 
-        private Texture2D MakeTex(int width, int height, Color col)
-        {
-            Color[] pix = new Color[width * height];
-            for (int i = 0; i < pix.Length; i++)
-                pix[i] = col;
-            Texture2D result = new Texture2D(width, height);
-            result.SetPixels(pix);
-            result.Apply();
-            return result;
-        }
-
         private void DrawBindingRow(string action, KeyCode currentKey)
         {
             GUILayout.BeginHorizontal();
@@ -537,7 +561,6 @@ namespace ReBinds
                 default: return;
             }
             MelonPreferences.Save();
-            MelonLogger.Msg($"Bound {action} to {key}");
         }
     }
 
